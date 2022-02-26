@@ -108,10 +108,10 @@ pub const ENVIRONMENT_INDEX: c_int = ffi::LUA_ENVIRONINDEX;
 // Main structs and traits.
 ///////////////////////////////////////////////////////////////////////////////
 
-/// A valid State pointer represents a thread.
+/// A valid State pointer represents a stack.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct ThreadRaw {
+pub struct Stack {
     ptr: *mut ffi::lua_State,
 }
 
@@ -120,7 +120,7 @@ pub struct ThreadRaw {
 // impl !Sync for ThreadRaw {}
 // impl !Send for ThreadRaw {}
 
-impl ThreadRaw {
+impl Stack {
     /// Wrap a new instance.
     ///
     /// # Safety
@@ -138,17 +138,17 @@ impl ThreadRaw {
     }
 }
 
-impl ThreadRawT for ThreadRaw {
+impl StackT for Stack {
     #[inline]
-    fn raw(&self) -> &ThreadRaw {
+    fn raw(&self) -> &Stack {
         self
     }
 }
 
-/// Lua thread trait.
-pub trait ThreadRawT {
+/// Lua stack trait.
+pub trait StackT {
     /// Return the ThreadRaw reference.
-    fn raw(&self) -> &ThreadRaw;
+    fn raw(&self) -> &Stack;
 
     /// Call a function
     #[inline]
@@ -299,7 +299,7 @@ pub trait ThreadRawT {
             data: *mut c_void,
             size: *mut usize,
         ) -> *const c_char {
-            let thread = ThreadRaw::wrap(state);
+            let thread = Stack::wrap(state);
             let size = &mut *size.cast::<MaybeUninit<usize>>();
             let data = &mut *data.cast::<LuaReaderData<'a, R>>();
 
@@ -351,24 +351,24 @@ pub trait ThreadRawT {
 
     /// Create a new thread from reference.
     #[inline]
-    fn new_thread_with_ref<'a, T: Sized + ThreadRawT>(
+    fn new_thread_with_ref<'a, T: Sized + StackT>(
         parent: &'a T,
     ) -> ThreadWithRef<'a, T> {
         unsafe {
             ThreadWithRef::wrap(
                 parent,
-                ThreadRaw::wrap(ffi::lua_newthread(parent.raw().ptr())),
+                Stack::wrap(ffi::lua_newthread(parent.raw().ptr())),
             )
         }
     }
 
     /// Create a new thread from an Rc.
     #[inline]
-    fn new_thread_with_rc<T: Sized + ThreadRawT>(rc: &Rc<T>) -> ThreadWithRc<T> {
+    fn new_thread_with_rc<T: Sized + StackT>(rc: &Rc<T>) -> ThreadWithRc<T> {
         unsafe {
             ThreadWithRc::wrap(
                 rc.clone(),
-                ThreadRaw::wrap(ffi::lua_newthread(rc.raw().ptr())),
+                Stack::wrap(ffi::lua_newthread(rc.raw().ptr())),
             )
         }
     }
@@ -391,7 +391,7 @@ pub trait ThreadRawT {
     fn new_userdata_drop<T: Sized>(&self, t: T) -> Result<(), Error> {
         /// Universal lua __gc metamethod.
         #[inline(never)]
-        extern "C" fn lua_gc<T: Sized>(thread: ThreadRaw) -> c_int {
+        extern "C" fn lua_gc<T: Sized>(thread: Stack) -> c_int {
             unsafe { ptr::drop_in_place(thread.to_userdata(1).cast::<T>()) }
             0
         }
@@ -435,14 +435,14 @@ pub trait ThreadRawT {
     #[inline]
     fn push_c_closure(
         &self,
-        f: extern "C" fn(state: ThreadRaw) -> c_int,
+        f: extern "C" fn(state: Stack) -> c_int,
         upvalue_count: c_int,
     ) {
         extern "C" {
             /// Alternative ffi::lua_pushcclosure function.
             fn lua_pushcclosure(
                 state: *mut ffi::lua_State,
-                f: extern "C" fn(ThreadRaw) -> c_int,
+                f: extern "C" fn(Stack) -> c_int,
                 upvalue_count: c_int,
             );
         }
@@ -452,7 +452,7 @@ pub trait ThreadRawT {
 
     /// Push a c function.
     #[inline]
-    fn push_c_function(&self, f: extern "C" fn(state: ThreadRaw) -> c_int) {
+    fn push_c_function(&self, f: extern "C" fn(state: Stack) -> c_int) {
         self.push_c_closure(f, 0)
     }
 
@@ -581,53 +581,53 @@ pub trait ThreadRawT {
     }
 }
 
-/// Thread with Send implemented; this should be used in most cases.
+/// Stack with Send implemented.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct ThreadRawSend(ThreadRaw);
+pub struct StackSend(Stack);
 
-impl ThreadRawSend {
+impl StackSend {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// This thread must be sendable.
     #[inline]
-    pub unsafe fn wrap(inner: ThreadRaw) -> Self {
+    pub unsafe fn wrap(inner: Stack) -> Self {
         Self(inner)
     }
 
     /// Unwrap the instance.
     #[inline]
-    pub fn unwrap(self) -> ThreadRaw {
+    pub fn unwrap(self) -> Stack {
         self.0
     }
 }
 
-unsafe impl Send for ThreadRawSend {}
+unsafe impl Send for StackSend {}
 
-impl ThreadRawT for ThreadRawSend {
+impl StackT for StackSend {
     #[inline]
-    fn raw(&self) -> &ThreadRaw {
+    fn raw(&self) -> &Stack {
         &self.0
     }
 }
 
 /// Lua thread stack with shared reference.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ThreadWithRef<'a, T: ThreadRawT> {
+pub struct ThreadWithRef<'a, T: StackT> {
     parent: &'a T,
-    inner: ThreadRaw,
+    inner: Stack,
 }
 
-impl<'a, T: ThreadRawT> ThreadWithRef<'a, T> {
+impl<'a, T: StackT> ThreadWithRef<'a, T> {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// inner must belong to the state.
     #[inline]
-    pub unsafe fn wrap(parent: &'a T, inner: ThreadRaw) -> Self {
+    pub unsafe fn wrap(parent: &'a T, inner: Stack) -> Self {
         Self { parent, inner }
     }
 
@@ -638,28 +638,28 @@ impl<'a, T: ThreadRawT> ThreadWithRef<'a, T> {
     }
 }
 
-impl<'a, T: ThreadRawT> ThreadRawT for ThreadWithRef<'a, T> {
+impl<'a, T: StackT> StackT for ThreadWithRef<'a, T> {
     #[inline]
-    fn raw(&self) -> &ThreadRaw {
+    fn raw(&self) -> &Stack {
         &self.inner
     }
 }
 
 /// Lua thread stack with RC.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ThreadWithRc<T: ThreadRawT> {
+pub struct ThreadWithRc<T: StackT> {
     parent: Rc<T>,
-    inner: ThreadRaw,
+    inner: Stack,
 }
 
-impl<T: ThreadRawT> ThreadWithRc<T> {
+impl<T: StackT> ThreadWithRc<T> {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// inner must belong to state.
     #[inline]
-    pub unsafe fn wrap(parent: Rc<T>, inner: ThreadRaw) -> Self {
+    pub unsafe fn wrap(parent: Rc<T>, inner: Stack) -> Self {
         Self { parent, inner }
     }
 
@@ -670,9 +670,9 @@ impl<T: ThreadRawT> ThreadWithRc<T> {
     }
 }
 
-impl<T: ThreadRawT> ThreadRawT for ThreadWithRc<T> {
+impl<T: StackT> StackT for ThreadWithRc<T> {
     #[inline]
-    fn raw(&self) -> &ThreadRaw {
+    fn raw(&self) -> &Stack {
         &self.inner
     }
 }
@@ -680,7 +680,7 @@ impl<T: ThreadRawT> ThreadRawT for ThreadWithRc<T> {
 /// Lua state struct.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct State(ThreadRawSend);
+pub struct State(StackSend);
 
 impl State {
     /// Wrap a new instance.
@@ -689,7 +689,7 @@ impl State {
     ///
     /// The thread must be the main thread returned from lua_newstate.
     #[inline]
-    pub unsafe fn wrap(thread: ThreadRawSend) -> Self {
+    pub unsafe fn wrap(thread: StackSend) -> Self {
         Self(thread)
     }
 
@@ -739,7 +739,7 @@ impl State {
             Err(Error::Mem)
         } else {
             Ok(unsafe {
-                Self::wrap(ThreadRawSend::wrap(ThreadRaw::wrap(new_state)))
+                Self::wrap(StackSend::wrap(Stack::wrap(new_state)))
             })
         }
     }
@@ -752,9 +752,9 @@ impl Drop for State {
     }
 }
 
-impl ThreadRawT for State {
+impl StackT for State {
     #[inline]
-    fn raw(&self) -> &ThreadRaw {
+    fn raw(&self) -> &Stack {
         self.0.raw()
     }
 }
