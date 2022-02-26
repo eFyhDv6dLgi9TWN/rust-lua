@@ -455,6 +455,12 @@ pub trait ThreadRawT {
         unsafe { ffi::lua_setmetatable(self.raw().ptr(), index) };
     }
 
+    /// Set table.
+    #[inline]
+    fn set_table(&self, index: c_int) {
+        unsafe { ffi::lua_settable(self.raw().ptr(), index) }
+    }
+
     /// Set new top index.
     #[inline]
     fn set_top(&self, index: c_int) {
