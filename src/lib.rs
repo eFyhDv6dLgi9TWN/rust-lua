@@ -7,7 +7,7 @@ pub use luajit_sys as ffi;
 
 use std::{
     alloc::{alloc, dealloc, realloc, Layout},
-    cell::UnsafeCell,
+    cell::Cell,
     convert::TryFrom,
     error::Error as StdErrorT,
     ffi::CStr,
@@ -326,12 +326,12 @@ pub trait ThreadRawT {
         }
 
         // Real code starts here.
-        let data = UnsafeCell::new(LuaReaderData::new(reader, buffer_size));
+        let data = Cell::new(LuaReaderData::new(reader, buffer_size));
         match unsafe {
             ffi::lua_load(
                 self.raw().ptr(),
                 Some(lua_reader::<'a, R>),
-                data.get().cast(),
+                data.as_ptr().cast(),
                 chunk_name.as_ptr(),
             )
         } {
@@ -489,9 +489,9 @@ pub trait ThreadRawT {
     where
         F: FnOnce(&[c_char]) -> D,
     {
-        let size = UnsafeCell::new(MaybeUninit::uninit());
+        let size = Cell::new(MaybeUninit::uninit());
         let ptr = unsafe {
-            ffi::lua_tolstring(self.raw().ptr(), index, size.get().cast())
+            ffi::lua_tolstring(self.raw().ptr(), index, size.as_ptr().cast())
         };
         f(unsafe {
             slice::from_raw_parts(ptr, size.into_inner().assume_init())
