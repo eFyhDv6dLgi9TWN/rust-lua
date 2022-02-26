@@ -349,24 +349,11 @@ pub trait StackT {
         self.create_table(0, 0)
     }
 
-    /// Create a new thread from reference.
-    #[inline]
-    fn new_thread_with_ref<'a, T: Sized + StackT>(
-        parent: &'a T,
-    ) -> ThreadWithRef<'a, T> {
-        unsafe {
-            ThreadWithRef::wrap(
-                parent,
-                Stack::wrap(ffi::lua_newthread(parent.raw().ptr())),
-            )
-        }
-    }
-
     /// Create a new thread from an Rc.
     #[inline]
-    fn new_thread_with_rc<T: Sized + StackT>(rc: &Rc<T>) -> ThreadWithRc<T> {
+    fn new_thread_with<T: Sized + StackT>(rc: &Rc<T>) -> Thread<T> {
         unsafe {
-            ThreadWithRc::wrap(
+            Thread::wrap(
                 rc.clone(),
                 Stack::wrap(ffi::lua_newthread(rc.raw().ptr())),
             )
@@ -613,46 +600,14 @@ impl StackT for StackSend {
     }
 }
 
-/// Lua thread stack with shared reference.
+/// Lua thread stack.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ThreadWithRef<'a, T: StackT> {
-    parent: &'a T,
-    inner: Stack,
-}
-
-impl<'a, T: StackT> ThreadWithRef<'a, T> {
-    /// Wrap a new instance.
-    ///
-    /// # Safety
-    ///
-    /// inner must belong to the state.
-    #[inline]
-    pub unsafe fn wrap(parent: &'a T, inner: Stack) -> Self {
-        Self { parent, inner }
-    }
-
-    /// Get a parent reference.
-    #[inline]
-    pub fn parent(&self) -> &T {
-        self.parent
-    }
-}
-
-impl<'a, T: StackT> StackT for ThreadWithRef<'a, T> {
-    #[inline]
-    fn raw(&self) -> &Stack {
-        &self.inner
-    }
-}
-
-/// Lua thread stack with RC.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ThreadWithRc<T: StackT> {
+pub struct Thread<T: StackT> {
     parent: Rc<T>,
     inner: Stack,
 }
 
-impl<T: StackT> ThreadWithRc<T> {
+impl<T: StackT> Thread<T> {
     /// Wrap a new instance.
     ///
     /// # Safety
@@ -670,7 +625,7 @@ impl<T: StackT> ThreadWithRc<T> {
     }
 }
 
-impl<T: StackT> StackT for ThreadWithRc<T> {
+impl<T: StackT> StackT for Thread<T> {
     #[inline]
     fn raw(&self) -> &Stack {
         &self.inner
