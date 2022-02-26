@@ -1,0 +1,12 @@
+[package]
+name = "lua-rs"
+description = "Low-level lua bindings for rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+luajit-sys = { path = "./luajit-sys" }
+enum_num_match = { path = "../enum_num_match" }
+
+[features]
+luajit = []
