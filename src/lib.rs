@@ -98,112 +98,6 @@ enum_num_match! {
 // Useful functions.
 ///////////////////////////////////////////////////////////////////////////////
 
-/// Default alignment.
-const MAX_ALIGN: usize = (usize::BITS >> 3) as usize;
-
-/// Function used by lua as allocator.
-unsafe extern "C" fn lua_alloc(
-    data: *mut c_void,
-    ptr: *mut c_void,
-    osize: usize,
-    nsize: usize,
-) -> *mut c_void {
-    let _data = MaybeUninit::new(data);
-
-    if nsize == 0 {
-        if osize != 0 {
-            dealloc(
-                ptr.cast(),
-                Layout::from_size_align(osize, MAX_ALIGN)
-                    .expect("Layout::from_size_align failed"),
-            );
-        }
-        ptr::null_mut()
-    } else {
-        let layout = Layout::from_size_align(nsize, MAX_ALIGN)
-            .expect("Layout::from_size_align failed");
-        if osize == 0 {
-            alloc(layout).cast()
-        } else {
-            realloc(ptr.cast(), layout, nsize).cast()
-        }
-    }
-}
-
-/// Data used by lua_reader.
-struct LuaReaderData<'a, R: StdReadT> {
-    reader: &'a mut R,
-    buffer_size: usize,
-    buffer: *mut c_char,
-}
-
-unsafe impl<'a, R: Send + StdReadT> Send for LuaReaderData<'a, R> {}
-unsafe impl<'a, R: Sync + StdReadT> Sync for LuaReaderData<'a, R> {}
-
-impl<'a, R: StdReadT> LuaReaderData<'a, R> {
-    /// Get a layout from buffer size. May panick.
-    #[inline]
-    pub fn layout(buffer_size: usize) -> Layout {
-        Layout::array::<c_char>(buffer_size).expect("Layout::array failed")
-    }
-
-    /// Create a new instance.
-    #[inline]
-    pub fn new(reader: &'a mut R, buffer_size: usize) -> Self {
-        Self {
-            buffer: if buffer_size == 0 {
-                unsafe { alloc(Self::layout(buffer_size)) }.cast()
-            } else {
-                unsafe { MaybeUninit::uninit().assume_init() }
-            },
-            buffer_size,
-            reader,
-        }
-    }
-}
-
-impl<'a, R: StdReadT> Drop for LuaReaderData<'a, R> {
-    #[inline]
-    fn drop(&mut self) {
-        if self.buffer_size != 0 {
-            unsafe {
-                dealloc(self.buffer.cast(), Self::layout(self.buffer_size))
-            }
-        }
-    }
-}
-
-/// Universal lua reader.
-#[inline(never)]
-unsafe extern "C" fn lua_reader<'a, R: 'a + StdReadT>(
-    state: *mut ffi::lua_State,
-    data: *mut c_void,
-    size: *mut usize,
-) -> *const c_char {
-    let thread = ThreadRaw::wrap(state);
-    let size = &mut *size.cast::<MaybeUninit<usize>>();
-    let data = &mut *data.cast::<LuaReaderData<'a, R>>();
-
-    if data.buffer_size == 0 {
-        size.write(0);
-    } else {
-        match data.reader.read(slice::from_raw_parts_mut(
-            data.buffer.cast(),
-            data.buffer_size,
-        )) {
-            Ok(s) => {
-                size.write(s);
-            }
-            Err(e) => {
-                thread
-                    .error_str(&format!("{}", e))
-                    .expect("State::error_str failed");
-            }
-        }
-    }
-    data.buffer
-}
-
 ///////////////////////////////////////////////////////////////////////////////
 // Constants.
 ///////////////////////////////////////////////////////////////////////////////
@@ -352,6 +246,86 @@ pub trait ThreadRawT {
         chunk_name: &CStr,
         buffer_size: usize,
     ) -> Result<(), Error> {
+        /// Data used by lua_reader.
+        struct LuaReaderData<'a, R: StdReadT> {
+            reader: &'a mut R,
+            buffer_size: usize,
+            buffer: *mut c_char,
+        }
+
+        // Useless but no reason why it's not Send + Sync.
+        unsafe impl<'a, R: Send + StdReadT> Send for LuaReaderData<'a, R> {}
+        unsafe impl<'a, R: Sync + StdReadT> Sync for LuaReaderData<'a, R> {}
+
+        impl<'a, R: StdReadT> LuaReaderData<'a, R> {
+            /// Get a layout from buffer size. May panick.
+            #[inline]
+            pub fn layout(buffer_size: usize) -> Layout {
+                Layout::array::<c_char>(buffer_size)
+                    .expect("Layout::array failed")
+            }
+
+            /// Create a new instance.
+            #[inline]
+            pub fn new(reader: &'a mut R, buffer_size: usize) -> Self {
+                Self {
+                    buffer: if buffer_size == 0 {
+                        unsafe { alloc(Self::layout(buffer_size)) }.cast()
+                    } else {
+                        unsafe { MaybeUninit::uninit().assume_init() }
+                    },
+                    buffer_size,
+                    reader,
+                }
+            }
+        }
+
+        impl<'a, R: StdReadT> Drop for LuaReaderData<'a, R> {
+            #[inline]
+            fn drop(&mut self) {
+                if self.buffer_size != 0 {
+                    unsafe {
+                        dealloc(
+                            self.buffer.cast(),
+                            Self::layout(self.buffer_size),
+                        )
+                    }
+                }
+            }
+        }
+
+        /// Universal lua reader.
+        #[inline(never)]
+        unsafe extern "C" fn lua_reader<'a, R: 'a + StdReadT>(
+            state: *mut ffi::lua_State,
+            data: *mut c_void,
+            size: *mut usize,
+        ) -> *const c_char {
+            let thread = ThreadRaw::wrap(state);
+            let size = &mut *size.cast::<MaybeUninit<usize>>();
+            let data = &mut *data.cast::<LuaReaderData<'a, R>>();
+
+            if data.buffer_size == 0 {
+                size.write(0);
+            } else {
+                match data.reader.read(slice::from_raw_parts_mut(
+                    data.buffer.cast(),
+                    data.buffer_size,
+                )) {
+                    Ok(s) => {
+                        size.write(s);
+                    }
+                    Err(e) => {
+                        thread
+                            .error_str(&format!("{}", e))
+                            .expect("State::error_str failed");
+                    }
+                }
+            }
+            data.buffer
+        }
+
+        // Real code starts here.
         let data = UnsafeCell::new(LuaReaderData::new(reader, buffer_size));
         match unsafe {
             ffi::lua_load(
@@ -379,15 +353,11 @@ pub trait ThreadRawT {
 
     /// Create a new thread.
     #[inline]
-    fn new_thread<T: Sized + ThreadRawT>(
-        rc: &Rc<T>,
-    ) -> Thread<T> {
+    fn new_thread<T: Sized + ThreadRawT>(rc: &Rc<T>) -> Thread<T> {
         unsafe {
             Thread::wrap(
                 rc.clone(),
-                ThreadRaw::wrap(ffi::lua_newthread(
-                    rc.raw().ptr(),
-                )),
+                ThreadRaw::wrap(ffi::lua_newthread(rc.raw().ptr())),
             )
         }
     }
@@ -604,6 +574,39 @@ impl State {
     /// Create a new instance.
     #[inline]
     pub fn new() -> Result<Self, Error> {
+        /// Default alignment.
+        const MAX_ALIGN: usize = (usize::BITS >> 3) as usize;
+
+        /// Function used by lua as allocator.
+        unsafe extern "C" fn lua_alloc(
+            data: *mut c_void,
+            ptr: *mut c_void,
+            osize: usize,
+            nsize: usize,
+        ) -> *mut c_void {
+            let _data = MaybeUninit::new(data);
+
+            if nsize == 0 {
+                if osize != 0 {
+                    dealloc(
+                        ptr.cast(),
+                        Layout::from_size_align(osize, MAX_ALIGN)
+                            .expect("Layout::from_size_align failed"),
+                    );
+                }
+                ptr::null_mut()
+            } else {
+                let layout = Layout::from_size_align(nsize, MAX_ALIGN)
+                    .expect("Layout::from_size_align failed");
+                if osize == 0 {
+                    alloc(layout).cast()
+                } else {
+                    realloc(ptr.cast(), layout, nsize).cast()
+                }
+            }
+        }
+
+        // Real code starts here.
         let new_state = unsafe {
             ffi::lua_newstate(
                 Some(lua_alloc),
