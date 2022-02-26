@@ -160,7 +160,7 @@ extern "C" {
 
 /// Lua thread trait.
 pub trait ThreadRawT {
-    /// Return the raw lua_State pointer.
+    /// Return the ThreadRaw reference.
     fn raw(&self) -> &ThreadRaw;
 
     /// Call a function
