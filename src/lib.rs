@@ -349,11 +349,24 @@ pub trait ThreadRawT {
         self.create_table(0, 0)
     }
 
-    /// Create a new thread.
+    /// Create a new thread from reference.
     #[inline]
-    fn new_thread<T: Sized + ThreadRawT>(rc: &Rc<T>) -> Thread<T> {
+    fn new_thread_with_ref<'a, T: Sized + ThreadRawT>(
+        parent: &'a T,
+    ) -> ThreadWithRef<'a, T> {
         unsafe {
-            Thread::wrap(
+            ThreadWithRef::wrap(
+                parent,
+                ThreadRaw::wrap(ffi::lua_newthread(parent.raw().ptr())),
+            )
+        }
+    }
+
+    /// Create a new thread from an Rc.
+    #[inline]
+    fn new_thread_with_rc<T: Sized + ThreadRawT>(rc: &Rc<T>) -> ThreadWithRc<T> {
+        unsafe {
+            ThreadWithRc::wrap(
                 rc.clone(),
                 ThreadRaw::wrap(ffi::lua_newthread(rc.raw().ptr())),
             )
@@ -600,24 +613,54 @@ impl ThreadRawT for ThreadRawSend {
     }
 }
 
-/// Lua thread stack.
-pub struct Thread<T: ThreadRawT> {
+/// Lua thread stack with shared reference.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ThreadWithRef<'a, T: ThreadRawT> {
+    parent: &'a T,
+    inner: ThreadRaw,
+}
+
+impl<'a, T: ThreadRawT> ThreadWithRef<'a, T> {
+    /// Wrap a new instance.
+    ///
+    /// # Safety
+    ///
+    /// inner must belong to the state.
+    #[inline]
+    pub unsafe fn wrap(parent: &'a T, inner: ThreadRaw) -> Self {
+        Self { parent, inner }
+    }
+
+    /// Get a parent reference.
+    #[inline]
+    pub fn parent(&self) -> &T {
+        self.parent
+    }
+}
+
+impl<'a, T: ThreadRawT> ThreadRawT for ThreadWithRef<'a, T> {
+    #[inline]
+    fn raw(&self) -> &ThreadRaw {
+        &self.inner
+    }
+}
+
+/// Lua thread stack with RC.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ThreadWithRc<T: ThreadRawT> {
     parent: Rc<T>,
     inner: ThreadRaw,
 }
 
-impl<T: ThreadRawT> Thread<T> {
+impl<T: ThreadRawT> ThreadWithRc<T> {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// inner must belong to state.
     #[inline]
-    pub unsafe fn wrap(state: Rc<T>, inner: ThreadRaw) -> Self {
-        Self {
-            parent: state,
-            inner,
-        }
+    pub unsafe fn wrap(parent: Rc<T>, inner: ThreadRaw) -> Self {
+        Self { parent, inner }
     }
 
     /// Get a reference of the parent stack.
@@ -627,7 +670,7 @@ impl<T: ThreadRawT> Thread<T> {
     }
 }
 
-impl<T: ThreadRawT> ThreadRawT for Thread<T> {
+impl<T: ThreadRawT> ThreadRawT for ThreadWithRc<T> {
     #[inline]
     fn raw(&self) -> &ThreadRaw {
         &self.inner
