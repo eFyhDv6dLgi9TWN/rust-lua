@@ -149,15 +149,6 @@ impl ThreadRawT for ThreadRaw {
     }
 }
 
-extern "C" {
-    /// Alternative ffi::lua_pushcclosure function.
-    fn lua_pushcclosure(
-        state: *mut ffi::lua_State,
-        f: extern "C" fn(ThreadRaw) -> c_int,
-        upvalue_count: c_int,
-    );
-}
-
 /// Lua thread trait.
 pub trait ThreadRawT {
     /// Return the ThreadRaw reference.
@@ -438,13 +429,22 @@ pub trait ThreadRawT {
         f: extern "C" fn(state: ThreadRaw) -> c_int,
         upvalue_count: c_int,
     ) {
+        extern "C" {
+            /// Alternative ffi::lua_pushcclosure function.
+            fn lua_pushcclosure(
+                state: *mut ffi::lua_State,
+                f: extern "C" fn(ThreadRaw) -> c_int,
+                upvalue_count: c_int,
+            );
+        }
+
         unsafe { lua_pushcclosure(self.raw().ptr(), f, upvalue_count) }
     }
 
     /// Push a c function.
     #[inline]
     fn push_c_function(&self, f: extern "C" fn(state: ThreadRaw) -> c_int) {
-        unsafe { lua_pushcclosure(self.raw().ptr(), f, 0) }
+        self.push_c_closure(f, 0)
     }
 
     /// Push an integer.
