@@ -584,8 +584,14 @@ impl ThreadRawSend {
     ///
     /// This thread must be sendable.
     #[inline]
-    pub fn wrap(inner: ThreadRaw) -> Self {
+    pub unsafe fn wrap(inner: ThreadRaw) -> Self {
         Self(inner)
+    }
+
+    /// Unwrap the instance.
+    #[inline]
+    pub fn unwrap(self) -> ThreadRaw {
+        self.0
     }
 }
 
@@ -638,6 +644,16 @@ impl<T: ThreadRawT> ThreadRawT for Thread<T> {
 pub struct State(ThreadRawSend);
 
 impl State {
+    /// Wrap a new instance.
+    ///
+    /// # Safety
+    ///
+    /// The thread must be the main thread returned from lua_newstate.
+    #[inline]
+    pub unsafe fn wrap(thread: ThreadRawSend) -> Self {
+        Self(thread)
+    }
+
     /// Create a new instance.
     #[inline]
     pub fn new() -> Result<Self, Error> {
@@ -683,9 +699,9 @@ impl State {
         if new_state.is_null() {
             Err(Error::Mem)
         } else {
-            Ok(Self(unsafe {
-                ThreadRawSend::wrap(ThreadRaw::wrap(new_state))
-            }))
+            Ok(unsafe {
+                Self::wrap(ThreadRawSend::wrap(ThreadRaw::wrap(new_state)))
+            })
         }
     }
 }
