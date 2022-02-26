@@ -13,7 +13,7 @@ use std::{
     ffi::CStr,
     fmt::{self, Display as StdDisplayT},
     io::Read as StdReadT,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     os::raw::{c_char, c_int, c_void},
     ptr,
     rc::Rc,
@@ -373,6 +373,38 @@ pub trait ThreadRawT {
         }
     }
 
+    /// Create a new full userdata. Note that the memory will be leaked without
+    /// setting metamethods.
+    #[inline]
+    fn new_userdata<T: Sized>(&self, t: T) {
+        unsafe {
+            let ptr: *mut MaybeUninit<T> =
+                ffi::lua_newuserdata(self.raw().ptr(), mem::size_of::<T>())
+                    .cast();
+            (&mut *ptr).write(t);
+        }
+    }
+
+    /// Create a new full userdata with __gc metamethod implemented. The
+    /// metatable of the userdata is a new table with only __gc field set.
+    #[inline]
+    fn new_userdata_drop<T: Sized>(&self, t: T) -> Result<(), Error> {
+        /// Universal lua __gc metamethod.
+        #[inline(never)]
+        extern "C" fn lua_gc<T: Sized>(thread: ThreadRaw) -> c_int {
+            unsafe { ptr::drop_in_place(thread.to_userdata(1).cast::<T>()) }
+            0
+        }
+        self.new_userdata(t);
+        self.check_stack(3)?;
+        self.new_table();
+        self.push_str("__gc");
+        self.push_c_function(lua_gc::<T>);
+        self.set_table(-3);
+        self.set_metatable(-2);
+        Ok(())
+    }
+
     /// Protected call.
     #[inline]
     fn pcall(
@@ -419,6 +451,12 @@ pub trait ThreadRawT {
     #[inline]
     fn push_integer(&self, n: ffi::lua_Integer) {
         unsafe { ffi::lua_pushinteger(self.raw().ptr(), n) }
+    }
+
+    /// Push light userdata (a pointer) onto the stack.
+    #[inline]
+    fn push_light_userdata(&self, ptr: *mut c_void) {
+        unsafe { ffi::lua_pushlightuserdata(self.raw().ptr(), ptr) }
     }
 
     /// Push nil.
@@ -519,6 +557,12 @@ pub trait ThreadRawT {
         f(unsafe {
             slice::from_raw_parts(ptr, size.into_inner().assume_init())
         })
+    }
+
+    /// To userdata (a pointer).
+    #[inline]
+    fn to_userdata(&self, index: c_int) -> *mut c_void {
+        unsafe { ffi::lua_touserdata(self.raw().ptr(), index) }
     }
 
     /// Get upvalue index.
