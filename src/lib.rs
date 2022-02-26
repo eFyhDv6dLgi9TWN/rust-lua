@@ -213,6 +213,17 @@ pub trait ThreadRawT {
         Ok(())
     }
 
+    /// Push the metatable of the given index onto the stack if it has one, and
+    /// return true; otherwise do nothing and return false.
+    #[inline]
+    fn get_metatable(&self, index: c_int) -> bool {
+        if unsafe { ffi::lua_getmetatable(self.raw().ptr(), index) } == 0 {
+            false
+        } else {
+            true
+        }
+    }
+
     /// Return the index of the top element.
     #[inline]
     fn get_top(&self) -> c_int {
@@ -436,6 +447,12 @@ pub trait ThreadRawT {
         unsafe {
             ffi::lua_pushlstring(self.raw().ptr(), s.as_ptr().cast(), s.len())
         }
+    }
+
+    /// Pop a table and set it as the metatable of the given index.
+    #[inline]
+    fn set_metatable(&self, index: c_int) {
+        unsafe { ffi::lua_setmetatable(self.raw().ptr(), index) };
     }
 
     /// Set new top index.
