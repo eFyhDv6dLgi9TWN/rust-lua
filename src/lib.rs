@@ -18,30 +18,48 @@ use std::{
     slice,
 };
 
-///////////////////////////////////////////////////////////////////////////////
-// Enumerators.
-///////////////////////////////////////////////////////////////////////////////
+//
+// Pseudo-indices.
+//
 
-/// Error struct returned by lua.
+/// Lua registry index.
+pub const REGISTRY_INEEX: c_int = ffi::LUA_REGISTRYINDEX;
+
+/// Lua environment index.
+pub const ENVIRONMENT_INDEX: c_int = ffi::LUA_ENVIRONINDEX;
+
+/// Lua global index.
+pub const GLOBAL_INDEX: c_int = ffi::LUA_GLOBALSINDEX;
+
+/// Lua upvalue index.
+pub const fn upvalue_index(index: c_int) -> c_int {
+    GLOBAL_INDEX - index
+}
+
+//
+// Error.
+//
+
+/// Error or thread status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Ok,
     Yield,
+    Syntax,
     Run,
     Err,
-    File,
     Mem,
 }
 
 #[rustfmt::skip]
 enum_num_match! {
     Error => c_int {
-        Ok    => ffi::LUA_OK,
-        Yield => ffi::LUA_YIELD,
-        Run   => ffi::LUA_ERRRUN,
-        Err   => ffi::LUA_ERRERR,
-        File  => ffi::LUA_ERRFILE,
-        Mem   => ffi::LUA_ERRMEM,
+        Ok     => ffi::LUA_OK,
+        Yield  => ffi::LUA_YIELD,
+        Syntax => ffi::LUA_ERRSYNTAX,
+        Run    => ffi::LUA_ERRRUN,
+        Err    => ffi::LUA_ERRERR,
+        Mem    => ffi::LUA_ERRMEM,
     }
 }
 
@@ -49,12 +67,12 @@ impl StdDisplayT for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         #[rustfmt::skip]
         let ret = f.write_str(match *self {
-            Self::Ok    => "success",
-            Self::Yield => "thread yield",
-            Self::Run   => "runtime error",
-            Self::Err   => "error when running the error handler",
-            Self::File  => "file error",
-            Self::Mem   => "memory error",
+            Self::Ok     => "success",
+            Self::Yield  => "thread yield",
+            Self::Syntax => "syntax error",
+            Self::Run    => "runtime error",
+            Self::Err    => "error when running the error handler",
+            Self::Mem    => "memory error",
         });
         ret
     }
@@ -62,7 +80,12 @@ impl StdDisplayT for Error {
 
 impl StdErrorT for Error {}
 
-/// Types
+//
+// Basic types.
+//
+
+/// Basic types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     None,
     Nil,
@@ -92,19 +115,16 @@ enum_num_match! {
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////
-// Constants.
-///////////////////////////////////////////////////////////////////////////////
+//
+// Types.
+//
 
-/// Lua global index.
-pub const GLOBAL_INDEX: c_int = ffi::LUA_GLOBALSINDEX;
+/// Type for C functions registered with lua.
+pub type CFunction = extern "C" fn(State) -> c_int;
 
-/// Lua environment index.
-pub const ENVIRONMENT_INDEX: c_int = ffi::LUA_ENVIRONINDEX;
-
-///////////////////////////////////////////////////////////////////////////////
-// Main structs and traits.
-///////////////////////////////////////////////////////////////////////////////
+//
+// Thread state.
+//
 
 /// A valid State pointer represents a stack.
 #[derive(Debug, PartialEq, Eq)]
@@ -148,10 +168,41 @@ pub trait StateT {
     /// Return the ThreadRaw reference.
     fn raw(&self) -> &State;
 
-    /// Call a function
+    //
+    // State manipulation.
+    //
+
+    /// Create a new thread from an Rc.
     #[inline]
-    fn call(&self, nargs: c_int, nresults: c_int) {
-        unsafe { ffi::lua_call(self.raw().ptr(), nargs, nresults) }
+    fn new_thread_with<T: Sized + StateT>(rc: &Rc<T>) -> Thread<T> {
+        unsafe {
+            Thread::wrap(
+                rc.clone(),
+                State::wrap(ffi::lua_newthread(rc.raw().ptr())),
+            )
+        }
+    }
+
+    //
+    // Basic stack manipulation.
+    //
+
+    /// Return the index of the top element.
+    #[inline]
+    fn get_top(&self) -> c_int {
+        unsafe { ffi::lua_gettop(self.raw().ptr()) }
+    }
+
+    /// Set new top index.
+    #[inline]
+    fn set_top(&self, index: c_int) {
+        unsafe { ffi::lua_settop(self.raw().ptr(), index) }
+    }
+
+    /// Move the top element to the index. Cannot be used with pseudo-indices.
+    #[inline]
+    fn insert(&self, index: c_int) {
+        unsafe { ffi::lua_insert(self.raw().ptr(), index) }
     }
 
     /// Check stack.
@@ -164,29 +215,164 @@ pub trait StateT {
         }
     }
 
-    /// Create a table.
+    //
+    // Access functions (stack -> rust).
+    //
+
+    /// Get type.
     #[inline]
-    fn create_table(&self, narr: c_int, nrec: c_int) {
-        unsafe { ffi::lua_createtable(self.raw().ptr(), narr, nrec) }
+    fn get_type(&self, index: c_int) -> Type {
+        Type::try_from(unsafe { ffi::lua_type(self.raw().ptr(), index) })
+            .expect("unknown output from lua_type")
     }
 
-    /// Generate error.
+    /// To number.
     #[inline]
-    fn error(&self) -> Result<(), Error> {
-        match unsafe { ffi::lua_error(self.raw().ptr()) } {
-            0 => Ok(()),
-            e => {
-                Err(Error::try_from(e).expect("unknown output from lua_error"))
-            }
+    fn to_number(&self, index: c_int) -> ffi::lua_Number {
+        unsafe { ffi::lua_tonumber(self.raw().ptr(), index) }
+    }
+
+    /// To integer.
+    #[inline]
+    fn to_integer(&self, index: c_int) -> ffi::lua_Integer {
+        unsafe { ffi::lua_tointeger(self.raw().ptr(), index) }
+    }
+
+    /// To boolean.
+    #[inline]
+    fn to_bool(&self, index: c_int) -> bool {
+        if unsafe { ffi::lua_toboolean(self.raw().ptr(), index) } == 0 {
+            false
+        } else {
+            true
         }
     }
 
-    /// Generate error from string slice.
+    /// To a slice.
     #[inline]
-    fn error_str(&self, e: &str) -> Result<(), Error> {
-        self.check_stack(1)?;
-        self.push_str(e);
-        self.error()
+    fn to_slice<F, D>(&self, index: c_int, f: F) -> D
+    where
+        F: FnOnce(&[c_char]) -> D,
+    {
+        let size = Cell::new(MaybeUninit::uninit());
+        let ptr = unsafe {
+            ffi::lua_tolstring(self.raw().ptr(), index, size.as_ptr().cast())
+        };
+        f(unsafe {
+            slice::from_raw_parts(ptr, size.into_inner().assume_init())
+        })
+    }
+
+    /// To c function.
+    #[inline]
+    fn to_c_function<F>(
+        &self,
+        index: c_int,
+    ) -> Option<unsafe extern "C" fn(state: *mut ffi::lua_State) -> c_int>
+    {
+        unsafe { ffi::lua_tocfunction(self.raw().ptr(), index) }
+    }
+
+    /// To userdata (a pointer).
+    #[inline]
+    fn to_userdata(&self, index: c_int) -> *mut c_void {
+        unsafe { ffi::lua_touserdata(self.raw().ptr(), index) }
+    }
+
+    //
+    // Push functions (rust -> stack).
+    //
+
+    /// Push nil.
+    #[inline]
+    fn push_nil(&self) {
+        unsafe { ffi::lua_pushnil(self.raw().ptr()) }
+    }
+
+    /// Push a number.
+    #[inline]
+    fn push_number(&self, n: ffi::lua_Number) {
+        unsafe { ffi::lua_pushnumber(self.raw().ptr(), n) }
+    }
+
+    /// Push an integer.
+    #[inline]
+    fn push_integer(&self, n: ffi::lua_Integer) {
+        unsafe { ffi::lua_pushinteger(self.raw().ptr(), n) }
+    }
+
+    /// Push a slice as string.
+    #[inline]
+    fn push_slice(&self, s: &[u8]) {
+        unsafe {
+            ffi::lua_pushlstring(self.raw().ptr(), s.as_ptr().cast(), s.len())
+        }
+    }
+
+    /// Push a string slice.
+    #[inline]
+    fn push_str(&self, s: &str) {
+        unsafe {
+            ffi::lua_pushlstring(self.raw().ptr(), s.as_ptr().cast(), s.len())
+        }
+    }
+
+    /// Push a c closure.
+    #[inline]
+    fn push_c_closure(
+        &self,
+        f: extern "C" fn(state: State) -> c_int,
+        upvalue_count: c_int,
+    ) {
+        extern "C" {
+            /// Alternative ffi::lua_pushcclosure function.
+            fn lua_pushcclosure(
+                state: *mut ffi::lua_State,
+                f: extern "C" fn(State) -> c_int,
+                upvalue_count: c_int,
+            );
+        }
+        unsafe { lua_pushcclosure(self.raw().ptr(), f, upvalue_count) }
+    }
+
+    /// Push a c function.
+    #[inline]
+    fn push_c_function(&self, f: extern "C" fn(state: State) -> c_int) {
+        self.push_c_closure(f, 0)
+    }
+
+    /// Push a boolean value.
+    #[inline]
+    fn push_bool(&self, b: bool) {
+        unsafe {
+            ffi::lua_pushboolean(self.raw().ptr(), if b { 1 } else { 0 })
+        }
+    }
+
+    /// Push light userdata (a pointer) onto the stack.
+    #[inline]
+    fn push_light_userdata(&self, ptr: *mut c_void) {
+        unsafe { ffi::lua_pushlightuserdata(self.raw().ptr(), ptr) }
+    }
+
+    /// Push self; return true if the self is the main thread.
+    #[inline]
+    fn push_thread(&self) -> bool {
+        if unsafe { ffi::lua_pushthread(self.raw().ptr()) } == 1 {
+            true
+        } else {
+            false
+        }
+    }
+
+    //
+    // Get functions (Lua -> stack).
+    //
+
+    /// Get table.
+    #[inline]
+    fn get_table(&self, index: c_int) {
+        unsafe { ffi::lua_gettable(self.raw().ptr(), index) }
     }
 
     /// Get field.
@@ -195,6 +381,44 @@ pub trait StateT {
         self.check_stack(1)?;
         self.push_str(key);
         self.get_table(index);
+        Ok(())
+    }
+
+    /// Create a table.
+    #[inline]
+    fn create_table(&self, narr: c_int, nrec: c_int) {
+        unsafe { ffi::lua_createtable(self.raw().ptr(), narr, nrec) }
+    }
+
+    /// Create a new full userdata. Note that the memory will be leaked without
+    /// setting metamethods.
+    #[inline]
+    fn new_userdata<T: Sized>(&self, t: T) {
+        unsafe {
+            let ptr: *mut MaybeUninit<T> =
+                ffi::lua_newuserdata(self.raw().ptr(), mem::size_of::<T>())
+                    .cast();
+            (&mut *ptr).write(t);
+        }
+    }
+
+    /// Create a new full userdata with __gc metamethod implemented. The
+    /// metatable of the userdata is a new table with only __gc field set.
+    #[inline]
+    fn new_userdata_drop<T: Sized>(&self, t: T) -> Result<(), Error> {
+        /// Universal lua __gc metamethod.
+        #[inline(never)]
+        extern "C" fn lua_gc<T: Sized>(thread: State) -> c_int {
+            unsafe { ptr::drop_in_place(thread.to_userdata(1).cast::<T>()) }
+            0
+        }
+        self.new_userdata(t);
+        self.check_stack(3)?;
+        self.create_table(0, 1);
+        self.push_str("__gc");
+        self.push_c_function(lua_gc::<T>);
+        self.set_table(-3);
+        self.set_metatable(-2);
         Ok(())
     }
 
@@ -209,29 +433,48 @@ pub trait StateT {
         }
     }
 
-    /// Return the index of the top element.
+    //
+    // Set functions (stack -> Lua).
+    //
+
+    /// Set table.
     #[inline]
-    fn get_top(&self) -> c_int {
-        unsafe { ffi::lua_gettop(self.raw().ptr()) }
+    fn set_table(&self, index: c_int) {
+        unsafe { ffi::lua_settable(self.raw().ptr(), index) }
     }
 
-    /// Get table.
+    /// Pop a table and set it as the metatable of the given index.
     #[inline]
-    fn get_table(&self, index: c_int) {
-        unsafe { ffi::lua_gettable(self.raw().ptr(), index) }
+    fn set_metatable(&self, index: c_int) {
+        unsafe { ffi::lua_setmetatable(self.raw().ptr(), index) };
     }
 
-    /// Get type.
+    //
+    // 'load' and 'call' functions (load and run Lua code).
+    //
+
+    /// Call a function
     #[inline]
-    fn get_type(&self, index: c_int) -> Type {
-        Type::try_from(unsafe { ffi::lua_type(self.raw().ptr(), index) })
-            .expect("unknown output from lua_type")
+    fn call(&self, nargs: c_int, nresults: c_int) {
+        unsafe { ffi::lua_call(self.raw().ptr(), nargs, nresults) }
     }
 
-    /// Move the top element to the index. Cannot be used with pseudo-indices.
+    /// Protected call.
     #[inline]
-    fn insert(&self, index: c_int) {
-        unsafe { ffi::lua_insert(self.raw().ptr(), index) }
+    fn pcall(
+        &self,
+        nargs: c_int,
+        nresults: c_int,
+        errfunc: c_int,
+    ) -> Result<(), Error> {
+        match unsafe {
+            ffi::lua_pcall(self.raw().ptr(), nargs, nresults, errfunc)
+        } {
+            0 => Ok(()),
+            e => {
+                Err(Error::try_from(e).expect("unknown output from lua_pcall"))
+            }
+        }
     }
 
     /// Load a readable type.
@@ -341,163 +584,9 @@ pub trait StateT {
         }
     }
 
-    /// Create a new table.
-    #[inline]
-    fn new_table(&self) {
-        self.create_table(0, 0)
-    }
-
-    /// Create a new thread from an Rc.
-    #[inline]
-    fn new_thread_with<T: Sized + StateT>(rc: &Rc<T>) -> Thread<T> {
-        unsafe {
-            Thread::wrap(
-                rc.clone(),
-                State::wrap(ffi::lua_newthread(rc.raw().ptr())),
-            )
-        }
-    }
-
-    /// Create a new full userdata. Note that the memory will be leaked without
-    /// setting metamethods.
-    #[inline]
-    fn new_userdata<T: Sized>(&self, t: T) {
-        unsafe {
-            let ptr: *mut MaybeUninit<T> =
-                ffi::lua_newuserdata(self.raw().ptr(), mem::size_of::<T>())
-                    .cast();
-            (&mut *ptr).write(t);
-        }
-    }
-
-    /// Create a new full userdata with __gc metamethod implemented. The
-    /// metatable of the userdata is a new table with only __gc field set.
-    #[inline]
-    fn new_userdata_drop<T: Sized>(&self, t: T) -> Result<(), Error> {
-        /// Universal lua __gc metamethod.
-        #[inline(never)]
-        extern "C" fn lua_gc<T: Sized>(thread: State) -> c_int {
-            unsafe { ptr::drop_in_place(thread.to_userdata(1).cast::<T>()) }
-            0
-        }
-        self.new_userdata(t);
-        self.check_stack(3)?;
-        self.new_table();
-        self.push_str("__gc");
-        self.push_c_function(lua_gc::<T>);
-        self.set_table(-3);
-        self.set_metatable(-2);
-        Ok(())
-    }
-
-    /// Protected call.
-    #[inline]
-    fn pcall(
-        &self,
-        nargs: c_int,
-        nresults: c_int,
-        errfunc: c_int,
-    ) -> Result<(), Error> {
-        match unsafe {
-            ffi::lua_pcall(self.raw().ptr(), nargs, nresults, errfunc)
-        } {
-            0 => Ok(()),
-            e => {
-                Err(Error::try_from(e).expect("unknown output from lua_pcall"))
-            }
-        }
-    }
-
-    /// Push a boolean value.
-    #[inline]
-    fn push_bool(&self, b: bool) {
-        unsafe {
-            ffi::lua_pushboolean(self.raw().ptr(), if b { 1 } else { 0 })
-        }
-    }
-
-    /// Push a c closure.
-    #[inline]
-    fn push_c_closure(
-        &self,
-        f: extern "C" fn(state: State) -> c_int,
-        upvalue_count: c_int,
-    ) {
-        extern "C" {
-            /// Alternative ffi::lua_pushcclosure function.
-            fn lua_pushcclosure(
-                state: *mut ffi::lua_State,
-                f: extern "C" fn(State) -> c_int,
-                upvalue_count: c_int,
-            );
-        }
-
-        unsafe { lua_pushcclosure(self.raw().ptr(), f, upvalue_count) }
-    }
-
-    /// Push a c function.
-    #[inline]
-    fn push_c_function(&self, f: extern "C" fn(state: State) -> c_int) {
-        self.push_c_closure(f, 0)
-    }
-
-    /// Push an integer.
-    #[inline]
-    fn push_integer(&self, n: ffi::lua_Integer) {
-        unsafe { ffi::lua_pushinteger(self.raw().ptr(), n) }
-    }
-
-    /// Push light userdata (a pointer) onto the stack.
-    #[inline]
-    fn push_light_userdata(&self, ptr: *mut c_void) {
-        unsafe { ffi::lua_pushlightuserdata(self.raw().ptr(), ptr) }
-    }
-
-    /// Push nil.
-    #[inline]
-    fn push_nil(&self) {
-        unsafe { ffi::lua_pushnil(self.raw().ptr()) }
-    }
-
-    /// Push a number.
-    #[inline]
-    fn push_number(&self, n: ffi::lua_Number) {
-        unsafe { ffi::lua_pushnumber(self.raw().ptr(), n) }
-    }
-
-    /// Push a slice as string.
-    #[inline]
-    fn push_slice(&self, s: &[u8]) {
-        unsafe {
-            ffi::lua_pushlstring(self.raw().ptr(), s.as_ptr().cast(), s.len())
-        }
-    }
-
-    /// Push a string slice.
-    #[inline]
-    fn push_str(&self, s: &str) {
-        unsafe {
-            ffi::lua_pushlstring(self.raw().ptr(), s.as_ptr().cast(), s.len())
-        }
-    }
-
-    /// Pop a table and set it as the metatable of the given index.
-    #[inline]
-    fn set_metatable(&self, index: c_int) {
-        unsafe { ffi::lua_setmetatable(self.raw().ptr(), index) };
-    }
-
-    /// Set table.
-    #[inline]
-    fn set_table(&self, index: c_int) {
-        unsafe { ffi::lua_settable(self.raw().ptr(), index) }
-    }
-
-    /// Set new top index.
-    #[inline]
-    fn set_top(&self, index: c_int) {
-        unsafe { ffi::lua_settop(self.raw().ptr(), index) }
-    }
+    //
+    // Coroutine functions.
+    //
 
     /// Return status.
     #[inline]
@@ -506,67 +595,39 @@ pub trait StateT {
             .expect("unknown output from lua_status")
     }
 
-    /// To boolean.
+    //
+    // Warning-related functions.
+    //
+
+    //
+    // Garbage-collection functions.
+    //
+
+    //
+    // Miscellaneous functions.
+    //
+
+    /// Generate error.
     #[inline]
-    fn to_bool(&self, index: c_int) -> bool {
-        if unsafe { ffi::lua_toboolean(self.raw().ptr(), index) } == 0 {
-            false
-        } else {
-            true
+    fn error(&self) -> Result<(), Error> {
+        match unsafe { ffi::lua_error(self.raw().ptr()) } {
+            0 => Ok(()),
+            e => {
+                Err(Error::try_from(e).expect("unknown output from lua_error"))
+            }
         }
     }
 
-    /// To c function.
+    /// Generate error from string slice.
     #[inline]
-    fn to_c_function<F>(
-        &self,
-        index: c_int,
-    ) -> Option<unsafe extern "C" fn(state: *mut ffi::lua_State) -> c_int>
-    {
-        unsafe { ffi::lua_tocfunction(self.raw().ptr(), index) }
-    }
-
-    /// To integer.
-    #[inline]
-    fn to_integer(&self, index: c_int) -> ffi::lua_Integer {
-        unsafe { ffi::lua_tointeger(self.raw().ptr(), index) }
-    }
-
-    /// To number.
-    #[inline]
-    fn to_number(&self, index: c_int) -> ffi::lua_Number {
-        unsafe { ffi::lua_tonumber(self.raw().ptr(), index) }
-    }
-
-    /// To a slice.
-    #[inline]
-    fn to_slice<F, D>(&self, index: c_int, f: F) -> D
-    where
-        F: FnOnce(&[c_char]) -> D,
-    {
-        let size = Cell::new(MaybeUninit::uninit());
-        let ptr = unsafe {
-            ffi::lua_tolstring(self.raw().ptr(), index, size.as_ptr().cast())
-        };
-        f(unsafe {
-            slice::from_raw_parts(ptr, size.into_inner().assume_init())
-        })
-    }
-
-    /// To userdata (a pointer).
-    #[inline]
-    fn to_userdata(&self, index: c_int) -> *mut c_void {
-        unsafe { ffi::lua_touserdata(self.raw().ptr(), index) }
-    }
-
-    /// Get upvalue index.
-    #[inline]
-    fn upvalue_index(&self, index: c_int) -> c_int {
-        GLOBAL_INDEX - index
+    fn error_str(&self, e: &str) -> Result<(), Error> {
+        self.check_stack(1)?;
+        self.push_str(e);
+        self.error()
     }
 }
 
-/// Stack with Send implemented.
+/// Thread state with Send implemented.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct StateSend(State);
@@ -597,6 +658,10 @@ impl StateT for StateSend {
         &self.0
     }
 }
+
+//
+// Thread.
+//
 
 /// Lua thread stack.
 #[derive(Debug, PartialEq, Eq)]
@@ -629,6 +694,10 @@ impl<T: StateT> StateT for Thread<T> {
         &self.inner
     }
 }
+
+//
+// Main thread.
+//
 
 /// Lua main thread.
 #[derive(Debug, PartialEq, Eq)]
