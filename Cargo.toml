@@ -5,8 +5,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-luajit-sys = { path = "./luajit-sys" }
 enum_num_match = { path = "../enum_num_match" }
+
+[build-dependencies]
+bindgen = "0.59.2"
+pkg-config = "0.3.24"
 
 [features]
 luajit = []

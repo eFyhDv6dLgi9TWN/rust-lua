@@ -1,9 +1,7 @@
 #[macro_use]
 extern crate enum_num_match;
 
-pub extern crate luajit_sys;
-
-pub use luajit_sys as ffi;
+pub mod ffi;
 
 use std::{
     alloc::{alloc, dealloc, realloc, Layout},
