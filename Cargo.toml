@@ -5,7 +5,7 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-enum_num_match = { path = "../enum_num_match" }
+enum-num-match = { path = "../enum-num-match" }
 
 [build-dependencies]
 bindgen = "0.59.2"
