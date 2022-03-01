@@ -109,7 +109,7 @@ pub const ENVIRONMENT_INDEX: c_int = ffi::LUA_ENVIRONINDEX;
 /// A valid State pointer represents a stack.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct Stack {
+pub struct State {
     ptr: *mut ffi::lua_State,
 }
 
@@ -118,7 +118,7 @@ pub struct Stack {
 // impl !Sync for ThreadRaw {}
 // impl !Send for ThreadRaw {}
 
-impl Stack {
+impl State {
     /// Wrap a new instance.
     ///
     /// # Safety
@@ -136,17 +136,17 @@ impl Stack {
     }
 }
 
-impl StackT for Stack {
+impl StateT for State {
     #[inline]
-    fn raw(&self) -> &Stack {
+    fn raw(&self) -> &State {
         self
     }
 }
 
 /// Lua stack trait.
-pub trait StackT {
+pub trait StateT {
     /// Return the ThreadRaw reference.
-    fn raw(&self) -> &Stack;
+    fn raw(&self) -> &State;
 
     /// Call a function
     #[inline]
@@ -297,7 +297,7 @@ pub trait StackT {
             data: *mut c_void,
             size: *mut usize,
         ) -> *const c_char {
-            let thread = Stack::wrap(state);
+            let thread = State::wrap(state);
             let size = &mut *size.cast::<MaybeUninit<usize>>();
             let data = &mut *data.cast::<LuaReaderData<'a, R>>();
 
@@ -349,11 +349,11 @@ pub trait StackT {
 
     /// Create a new thread from an Rc.
     #[inline]
-    fn new_thread_with<T: Sized + StackT>(rc: &Rc<T>) -> Thread<T> {
+    fn new_thread_with<T: Sized + StateT>(rc: &Rc<T>) -> Thread<T> {
         unsafe {
             Thread::wrap(
                 rc.clone(),
-                Stack::wrap(ffi::lua_newthread(rc.raw().ptr())),
+                State::wrap(ffi::lua_newthread(rc.raw().ptr())),
             )
         }
     }
@@ -376,7 +376,7 @@ pub trait StackT {
     fn new_userdata_drop<T: Sized>(&self, t: T) -> Result<(), Error> {
         /// Universal lua __gc metamethod.
         #[inline(never)]
-        extern "C" fn lua_gc<T: Sized>(thread: Stack) -> c_int {
+        extern "C" fn lua_gc<T: Sized>(thread: State) -> c_int {
             unsafe { ptr::drop_in_place(thread.to_userdata(1).cast::<T>()) }
             0
         }
@@ -420,14 +420,14 @@ pub trait StackT {
     #[inline]
     fn push_c_closure(
         &self,
-        f: extern "C" fn(state: Stack) -> c_int,
+        f: extern "C" fn(state: State) -> c_int,
         upvalue_count: c_int,
     ) {
         extern "C" {
             /// Alternative ffi::lua_pushcclosure function.
             fn lua_pushcclosure(
                 state: *mut ffi::lua_State,
-                f: extern "C" fn(Stack) -> c_int,
+                f: extern "C" fn(State) -> c_int,
                 upvalue_count: c_int,
             );
         }
@@ -437,7 +437,7 @@ pub trait StackT {
 
     /// Push a c function.
     #[inline]
-    fn push_c_function(&self, f: extern "C" fn(state: Stack) -> c_int) {
+    fn push_c_function(&self, f: extern "C" fn(state: State) -> c_int) {
         self.push_c_closure(f, 0)
     }
 
@@ -569,50 +569,50 @@ pub trait StackT {
 /// Stack with Send implemented.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct StackSend(Stack);
+pub struct StateSend(State);
 
-impl StackSend {
+impl StateSend {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// This thread must be sendable.
     #[inline]
-    pub unsafe fn wrap(inner: Stack) -> Self {
+    pub unsafe fn wrap(inner: State) -> Self {
         Self(inner)
     }
 
     /// Unwrap the instance.
     #[inline]
-    pub fn unwrap(self) -> Stack {
+    pub fn unwrap(self) -> State {
         self.0
     }
 }
 
-unsafe impl Send for StackSend {}
+unsafe impl Send for StateSend {}
 
-impl StackT for StackSend {
+impl StateT for StateSend {
     #[inline]
-    fn raw(&self) -> &Stack {
+    fn raw(&self) -> &State {
         &self.0
     }
 }
 
 /// Lua thread stack.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Thread<T: StackT> {
+pub struct Thread<T: StateT> {
     parent: Rc<T>,
-    inner: Stack,
+    inner: State,
 }
 
-impl<T: StackT> Thread<T> {
+impl<T: StateT> Thread<T> {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// inner must belong to state.
     #[inline]
-    pub unsafe fn wrap(parent: Rc<T>, inner: Stack) -> Self {
+    pub unsafe fn wrap(parent: Rc<T>, inner: State) -> Self {
         Self { parent, inner }
     }
 
@@ -623,26 +623,26 @@ impl<T: StackT> Thread<T> {
     }
 }
 
-impl<T: StackT> StackT for Thread<T> {
+impl<T: StateT> StateT for Thread<T> {
     #[inline]
-    fn raw(&self) -> &Stack {
+    fn raw(&self) -> &State {
         &self.inner
     }
 }
 
-/// Lua state struct.
+/// Lua main thread.
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct State(StackSend);
+pub struct MainThread(StateSend);
 
-impl State {
+impl MainThread {
     /// Wrap a new instance.
     ///
     /// # Safety
     ///
     /// The thread must be the main thread returned from lua_newstate.
     #[inline]
-    pub unsafe fn wrap(thread: StackSend) -> Self {
+    pub unsafe fn wrap(thread: StateSend) -> Self {
         Self(thread)
     }
 
@@ -691,23 +691,21 @@ impl State {
         if new_state.is_null() {
             Err(Error::Mem)
         } else {
-            Ok(unsafe {
-                Self::wrap(StackSend::wrap(Stack::wrap(new_state)))
-            })
+            Ok(unsafe { Self::wrap(StateSend::wrap(State::wrap(new_state))) })
         }
     }
 }
 
-impl Drop for State {
+impl Drop for MainThread {
     #[inline]
     fn drop(&mut self) {
         unsafe { ffi::lua_close(self.0.raw().ptr()) }
     }
 }
 
-impl StackT for State {
+impl StateT for MainThread {
     #[inline]
-    fn raw(&self) -> &Stack {
+    fn raw(&self) -> &State {
         self.0.raw()
     }
 }
